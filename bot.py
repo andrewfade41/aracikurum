@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import time
 import smtplib
 from datetime import datetime, timezone, timedelta
 from email.mime.multipart import MIMEMultipart
@@ -79,6 +80,45 @@ def fetch_ratings():
     data = response.json()
     return data.get('results', [])
 
+def fetch_current_prices(tickers):
+    """Fetches current stock prices sequentially from Yahoo Finance (BIST ending with .IS)."""
+    prices = {}
+    if not tickers:
+        return prices
+        
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    
+    print(f"Fetching current prices for {len(tickers)} stocks from Yahoo Finance...")
+    for i, ticker in enumerate(tickers):
+        if not ticker:
+            continue
+        yahoo_ticker = f"{ticker}.IS"
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_ticker}"
+        
+        # Add a tiny delay between requests to avoid rate limits
+        if i > 0:
+            time.sleep(0.2)
+            
+        try:
+            response = curl_requests.get(url, headers=headers, timeout=5, impersonate='chrome')
+            if response.status_code == 200:
+                data = response.json()
+                meta = data.get("chart", {}).get("result", [{}])[0].get("meta", {})
+                price = meta.get("regularMarketPrice")
+                if price is not None:
+                    prices[ticker] = price
+                    print(f"  {ticker}: {price} TL")
+                else:
+                    print(f"  {ticker}: Price field not found in Yahoo response.")
+            else:
+                print(f"  {ticker}: Yahoo returned status code {response.status_code}")
+        except Exception as e:
+            print(f"  {ticker}: Error fetching price: {e}")
+            
+    return prices
+
 def process_ratings(results, lookback_hours):
     """Processes ratings, groups them, and filters recent ones."""
     now = datetime.now(timezone.utc)
@@ -118,8 +158,20 @@ def process_ratings(results, lookback_hours):
         
     return recent_by_stock, all_by_stock
 
-def generate_html_report(recent_by_stock, all_by_stock, lookback_hours):
-    """Generates a styled HTML email body."""
+def calculate_potential_html(target, current):
+    """Helper to calculate and format potential upside/downside."""
+    if not target or not current or current <= 0:
+        return ""
+    diff = ((target - current) / current) * 100
+    if diff > 0:
+        return f'<span style="font-weight: bold; color: #10b981; margin-left: 6px; font-size: 12.5px;">(+%{diff:.1f})</span>'
+    elif diff < 0:
+        return f'<span style="font-weight: bold; color: #ef4444; margin-left: 6px; font-size: 12.5px;">(-%{abs(diff):.1f})</span>'
+    else:
+        return f'<span style="font-weight: bold; color: #64748b; margin-left: 6px; font-size: 12.5px;">(%0.0)</span>'
+
+def generate_html_report(recent_by_stock, all_by_stock, lookback_hours, prices_dict):
+    """Generates a styled HTML email body with current prices, potential differences, and model portfolios."""
     now_local = datetime.now(timezone(timedelta(hours=3))) # Turkey Time (UTC+3)
     formatted_date = now_local.strftime("%d.%m.%Y %H:%M")
     
@@ -324,7 +376,7 @@ def generate_html_report(recent_by_stock, all_by_stock, lookback_hours):
                     </div>
         """
         
-        # As an enhancement, show the last 5 updates overall in the system so the mail isn't empty
+        # As an enhancement, show the last 10 updates overall in the system so the mail isn't empty
         all_updates = []
         for stock, items in all_by_stock.items():
             all_updates.extend(items)
@@ -342,7 +394,7 @@ def generate_html_report(recent_by_stock, all_by_stock, lookback_hours):
                                     <th>Hisse</th>
                                     <th>Aracı Kurum</th>
                                     <th>Hedef Fiyat</th>
-                                    <th>Tavsiye</th>
+                                    <th>Tavsiye / Model Portföy</th>
                                     <th>Tarih</th>
                                 </tr>
                             </thead>
@@ -350,18 +402,32 @@ def generate_html_report(recent_by_stock, all_by_stock, lookback_hours):
             """
             for item in all_updates[:10]:
                 stock = item.get('code', '-')
+                current_price = prices_dict.get(stock)
                 broker = item.get('brokerage', {}).get('short_title') or item.get('brokerage', {}).get('title', '-')
                 target = item.get('price_target')
                 target_str = f"{target:.2f} TL" if target else "Belirtilmemiş"
+                
+                # Fetch price string for symbol next to ticker
+                stock_label = stock
+                if current_price:
+                    stock_label = f'{stock} <br><span style="font-size: 11px; color: #64748b; font-weight: normal;">(Fiyat: {current_price:.2f} TL)</span>'
+                    
                 rec_type = item.get('type')
                 rec_text = TYPE_TRANSLATIONS.get(rec_type, 'Belirtilmemiş')
                 badge_color = TYPE_COLORS.get(rec_type, '#6b7280')
+                
+                pot_html = calculate_potential_html(target, current_price)
+                
+                # Model portfolio badge
+                mp_badge = ""
+                if item.get('in_model_portfolio'):
+                    mp_badge = '<span class="badge" style="background-color: #2563eb; margin-left: 4px; font-size: 9px; padding: 2px 5px; vertical-align: middle;">Model Portföy</span>'
+                
                 pub_str = item.get('published_at', '')
                 pub_date = "-"
                 if pub_str:
                     try:
                         pub_dt = datetime.fromisoformat(pub_str.replace('Z', '+00:00'))
-                        # convert to Turkey Time
                         pub_dt_tr = pub_dt.astimezone(timezone(timedelta(hours=3)))
                         pub_date = pub_dt_tr.strftime("%d.%m.%Y")
                     except Exception:
@@ -369,10 +435,14 @@ def generate_html_report(recent_by_stock, all_by_stock, lookback_hours):
                         
                 html_body += f"""
                                 <tr>
-                                    <td style="font-weight: 700; color: #1e3a8a;">{stock}</td>
+                                    <td style="font-weight: 700; color: #1e3a8a; vertical-align: middle;">{stock_label}</td>
                                     <td>{broker}</td>
                                     <td style="font-weight: 600;">{target_str}</td>
-                                    <td><span class="badge" style="background-color: {badge_color};">{rec_text}</span></td>
+                                    <td>
+                                        <span class="badge" style="background-color: {badge_color};">{rec_text}</span>
+                                        {pot_html}
+                                        {mp_badge}
+                                    </td>
                                     <td style="color: #64748b; font-size: 12px;">{pub_date}</td>
                                 </tr>
                 """
@@ -390,6 +460,22 @@ def generate_html_report(recent_by_stock, all_by_stock, lookback_hours):
         
         for stock, updates in recent_by_stock.items():
             all_ratings = all_by_stock.get(stock, [])
+            current_price = prices_dict.get(stock)
+            
+            # Model portfolio status at stock level
+            mp_brokers = [r.get('brokerage', {}).get('short_title') or r.get('brokerage', {}).get('title', '') 
+                          for r in all_ratings if r.get('in_model_portfolio')]
+            mp_html = ""
+            if mp_brokers:
+                mp_brokers_str = ", ".join(mp_brokers[:3])
+                if len(mp_brokers) > 3:
+                    mp_brokers_str += "..."
+                mp_html = f'<span class="badge" style="background-color: #2563eb; font-size: 10px; margin-left: 8px; vertical-align: middle; padding: 3px 8px;">Model Portföy ({mp_brokers_str})</span>'
+            
+            # Format price string next to stock name
+            price_str = ""
+            if current_price:
+                price_str = f'<span style="font-size: 14px; color: #64748b; font-weight: 600; margin-left: 8px; vertical-align: middle;">(Son Fiyat: {current_price:.2f} TL)</span>'
             
             # Calculate Consensus Stats
             targets = [r.get('price_target') for r in all_ratings if r.get('price_target') is not None]
@@ -402,10 +488,23 @@ def generate_html_report(recent_by_stock, all_by_stock, lookback_hours):
             min_target_str = f"{min_target:.2f} TL" if min_target else "-"
             max_target_str = f"{max_target:.2f} TL" if max_target else "-"
             
+            # Consensus average potential upside html
+            avg_pot_html = ""
+            if current_price and avg_target:
+                avg_pot = ((avg_target - current_price) / current_price) * 100
+                if avg_pot > 0:
+                    avg_pot_html = f'<div style="font-size: 11px; color: #10b981; font-weight: 600; margin-top: 2px;">(+%{avg_pot:.1f} Pot.)</div>'
+                elif avg_pot < 0:
+                    avg_pot_html = f'<div style="font-size: 11px; color: #ef4444; font-weight: 600; margin-top: 2px;">(-%{abs(avg_pot):.1f} Pot.)</div>'
+                else:
+                    avg_pot_html = f'<div style="font-size: 11px; color: #64748b; font-weight: 600; margin-top: 2px;">(%0.0 Pot.)</div>'
+            
             html_body += f"""
                     <div class="stock-card">
                         <div class="stock-header">
                             <span class="stock-ticker">{stock}</span>
+                            {price_str}
+                            {mp_html}
                             <span style="float: right; color: #64748b; font-size: 12px; margin-top: 6px;">Güncelleme Sayısı: {len(updates)}</span>
                             <div style="clear: both;"></div>
                         </div>
@@ -416,7 +515,7 @@ def generate_html_report(recent_by_stock, all_by_stock, lookback_hours):
                                 <tr>
                                     <th>Yeni Güncelleyen Aracı Kurum</th>
                                     <th>Yeni Hedef Fiyat</th>
-                                    <th>Tavsiye</th>
+                                    <th>Tavsiye / Fark</th>
                                     <th>Saat</th>
                                 </tr>
                             </thead>
@@ -429,9 +528,20 @@ def generate_html_report(recent_by_stock, all_by_stock, lookback_hours):
                 logo_url = item.get('brokerage', {}).get('logo')
                 target = item.get('price_target')
                 target_str = f"{target:.2f} TL" if target else "Belirtilmemiş"
+                
+                # Recommendation translation and color
                 rec_type = item.get('type')
                 rec_text = TYPE_TRANSLATIONS.get(rec_type, 'Belirtilmemiş')
                 badge_color = TYPE_COLORS.get(rec_type, '#6b7280')
+                
+                # Percentage Difference
+                pot_html = calculate_potential_html(target, current_price)
+                
+                # Model Portfolio
+                mp_badge = ""
+                if item.get('in_model_portfolio'):
+                    mp_badge = '<span class="badge" style="background-color: #2563eb; margin-left: 4px; font-size: 10px; padding: 2px 6px; vertical-align: middle;">Model Portföy</span>'
+                
                 pub_str = item.get('published_at', '')
                 pub_time = "-"
                 if pub_str:
@@ -447,7 +557,11 @@ def generate_html_report(recent_by_stock, all_by_stock, lookback_hours):
                                 <tr>
                                     <td style="font-weight: 600;">{logo_html}{broker_short}</td>
                                     <td style="font-weight: 700; color: #1e3a8a;">{target_str}</td>
-                                    <td><span class="badge" style="background-color: {badge_color};">{rec_text}</span></td>
+                                    <td>
+                                        <span class="badge" style="background-color: {badge_color};">{rec_text}</span>
+                                        {pot_html}
+                                        {mp_badge}
+                                    </td>
                                     <td style="color: #64748b; font-size: 12px;">{pub_time}</td>
                                 </tr>
                 """
@@ -473,9 +587,19 @@ def generate_html_report(recent_by_stock, all_by_stock, lookback_hours):
                     logo_url = item.get('brokerage', {}).get('logo')
                     target = item.get('price_target')
                     target_str = f"{target:.2f} TL" if target else "-"
+                    
                     rec_type = item.get('type')
                     rec_text = TYPE_TRANSLATIONS.get(rec_type, 'Belirtilmemiş')
                     badge_color = TYPE_COLORS.get(rec_type, '#6b7280')
+                    
+                    # Percentage Difference
+                    pot_html = calculate_potential_html(target, current_price)
+                    
+                    # Model Portfolio
+                    mp_badge = ""
+                    if item.get('in_model_portfolio'):
+                        mp_badge = '<span class="badge" style="background-color: #2563eb; margin-left: 4px; font-size: 9px; padding: 1px 4px; vertical-align: middle;">Model Portföy</span>'
+                    
                     pub_str = item.get('published_at', '')
                     pub_date = "-"
                     if pub_str:
@@ -491,7 +615,11 @@ def generate_html_report(recent_by_stock, all_by_stock, lookback_hours):
                                 <tr style="background-color: transparent;">
                                     <td style="padding: 8px 20px; font-size: 12.5px; color: #475569;">{logo_html}{broker_short}</td>
                                     <td style="padding: 8px 20px; font-size: 12.5px; font-weight: 600; color: #475569;">{target_str}</td>
-                                    <td style="padding: 8px 20px;"><span class="badge" style="background-color: {badge_color}; opacity: 0.85; padding: 2px 6px; font-size: 10px;">{rec_text}</span></td>
+                                    <td style="padding: 8px 20px;">
+                                        <span class="badge" style="background-color: {badge_color}; opacity: 0.85; padding: 2px 6px; font-size: 10px;">{rec_text}</span>
+                                        {pot_html}
+                                        {mp_badge}
+                                    </td>
                                     <td style="padding: 8px 20px; color: #94a3b8; font-size: 11px; text-align: right;">{pub_date}</td>
                                 </tr>
                     """
@@ -508,16 +636,17 @@ def generate_html_report(recent_by_stock, all_by_stock, lookback_hours):
                                     <td class="stat-cell">
                                         <div class="stat-label">Ortalama Hedef</div>
                                         <div class="stat-value" style="color: #3b82f6;">{avg_target_str}</div>
+                                        {avg_pot_html}
                                     </td>
-                                    <td class="stat-cell" style="border-left: 1px solid #e2e8f0;">
+                                    <td class="stat-cell" style="border-left: 1px solid #e2e8f0; vertical-align: top;">
                                         <div class="stat-label">En Yüksek Hedef</div>
                                         <div class="stat-value">{max_target_str}</div>
                                     </td>
-                                    <td class="stat-cell" style="border-left: 1px solid #e2e8f0;">
+                                    <td class="stat-cell" style="border-left: 1px solid #e2e8f0; vertical-align: top;">
                                         <div class="stat-label">En Düşük Hedef</div>
                                         <div class="stat-value">{min_target_str}</div>
                                     </td>
-                                    <td class="stat-cell" style="border-left: 1px solid #e2e8f0;">
+                                    <td class="stat-cell" style="border-left: 1px solid #e2e8f0; vertical-align: top;">
                                         <div class="stat-label">Kurum Sayısı</div>
                                         <div class="stat-value">{num_brokers}</div>
                                     </td>
@@ -594,6 +723,19 @@ def main():
         recent_by_stock, all_by_stock = process_ratings(results, LOOKBACK_HOURS)
         print(f"Found {len(recent_by_stock)} stocks with updates in the last {LOOKBACK_HOURS} hours.")
         
+        # Determine all tickers we need to fetch prices for
+        tickers_to_fetch = list(recent_by_stock.keys())
+        if not tickers_to_fetch:
+            # If no recent updates, we'll show the last 10 updates, so fetch those stock tickers
+            all_updates = []
+            for stock, items in all_by_stock.items():
+                all_updates.extend(items)
+            all_updates.sort(key=lambda x: x.get('published_at', ''), reverse=True)
+            tickers_to_fetch = list(set(item.get('code') for item in all_updates[:10] if item.get('code')))
+            
+        # Fetch current stock prices from Yahoo Finance
+        prices_dict = fetch_current_prices(tickers_to_fetch)
+        
         # Build Subject Line
         now_local = datetime.now(timezone(timedelta(hours=3))) # Turkey Time
         date_str = now_local.strftime("%d.%m.%Y")
@@ -606,7 +748,7 @@ def main():
         else:
             subject = f"Analist Raporu: Yeni Güncelleme Yok - {date_str}"
             
-        html_content = generate_html_report(recent_by_stock, all_by_stock, LOOKBACK_HOURS)
+        html_content = generate_html_report(recent_by_stock, all_by_stock, LOOKBACK_HOURS, prices_dict)
         
         send_email(subject, html_content)
         
