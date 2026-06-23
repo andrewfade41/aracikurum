@@ -6,6 +6,8 @@ import smtplib
 from datetime import datetime, timezone, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import make_msgid, formatdate
+from email.header import Header
 
 # Import curl_cffi for bypassing Cloudflare
 try:
@@ -793,11 +795,23 @@ def send_email(subject, html_content):
     recipients = [email.strip() for email in EMAIL_TO.split(",")]
     
     msg = MIMEMultipart('alternative')
-    msg['Subject'] = subject
-    msg['From'] = f"{EMAIL_FROM} <{SMTP_USERNAME}>"
+    msg['Subject'] = Header(subject, 'utf-8')
+    
+    # Use clean From header to prevent Gmail spoofing/spam detection
+    if EMAIL_FROM:
+        msg['From'] = f"{Header(EMAIL_FROM, 'utf-8')} <{SMTP_USERNAME}>"
+    else:
+        msg['From'] = SMTP_USERNAME
+        
     msg['To'] = ", ".join(recipients)
     
-    msg.attach(MIMEText(html_content, 'html'))
+    # Crucial headers for spam filters (RFC 5322)
+    smtp_domain = SMTP_SERVER.split('.')[-2] if '.' in SMTP_SERVER else 'gmail'
+    msg['Message-ID'] = make_msgid(domain=f"{smtp_domain}.com")
+    msg['Date'] = formatdate(localtime=True)
+    msg['MIME-Version'] = '1.0'
+    
+    msg.attach(MIMEText(html_content, 'html', 'utf-8'))
     
     try:
         print(f"Connecting to SMTP server {SMTP_SERVER}:{SMTP_PORT}...")
@@ -822,6 +836,7 @@ def send_email(subject, html_content):
             f.write(html_content)
         print("Failed report HTML saved to error_report_fallback.html")
         raise e
+
 
 def main():
     try:
