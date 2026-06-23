@@ -1,0 +1,49 @@
+name: Daily Fintables Analyst Ratings Bot
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  schedule:
+    # 17:00 UTC corresponds to 20:00 (8:00 PM) Turkey Time (TRT = UTC+3)
+    - cron: '0 17 * * *'
+  workflow_dispatch:
+    inputs:
+      lookback_hours:
+        description: 'Lookback window in hours'
+        required: true
+        default: '24'
+
+jobs:
+  run-bot:
+    name: Run Ratings Tracker Bot
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run Bot
+        env:
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          # Use lookback hours from manual input if run manually, otherwise default to 24
+          LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours || '24' }}
+        run: |
+          python bot.py
