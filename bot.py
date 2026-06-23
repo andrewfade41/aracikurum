@@ -159,7 +159,7 @@ def process_ratings(results, lookback_hours):
     return recent_by_stock, all_by_stock
 
 def calculate_potential_html(target, current):
-    """Helper to calculate and format potential upside/downside."""
+    """Helper to calculate and format potential upside/downside HTML."""
     if not target or not current or current <= 0:
         return ""
     diff = ((target - current) / current) * 100
@@ -171,7 +171,7 @@ def calculate_potential_html(target, current):
         return f'<span style="font-weight: bold; color: #64748b; margin-left: 6px; font-size: 12.5px;">(%0.0)</span>'
 
 def generate_html_report(recent_by_stock, all_by_stock, lookback_hours, prices_dict):
-    """Generates a styled HTML email body with current prices, potential differences, and model portfolios."""
+    """Generates a styled HTML email body with a summary table, current prices, potentials, and model portfolios."""
     now_local = datetime.now(timezone(timedelta(hours=3))) # Turkey Time (UTC+3)
     formatted_date = now_local.strftime("%d.%m.%Y %H:%M")
     
@@ -194,7 +194,7 @@ def generate_html_report(recent_by_stock, all_by_stock, lookback_hours, prices_d
         box-sizing: border-box;
     }
     .container {
-        max-width: 680px;
+        max-width: 720px;
         margin: 0 auto;
         background-color: #ffffff;
         border-radius: 16px;
@@ -221,6 +221,15 @@ def generate_html_report(recent_by_stock, all_by_stock, lookback_hours, prices_d
     }
     .content {
         padding: 32px 24px;
+    }
+    .section-title {
+        margin-top: 0; 
+        color: #1e3a8a; 
+        font-size: 16px; 
+        font-weight: bold;
+        border-bottom: 2px solid #e2e8f0; 
+        padding-bottom: 8px;
+        margin-bottom: 16px;
     }
     .info-box {
         background-color: #eff6ff;
@@ -301,8 +310,34 @@ def generate_html_report(recent_by_stock, all_by_stock, lookback_hours, prices_d
         border-bottom: 1px solid #f1f5f9;
         vertical-align: middle;
     }
-    .ratings-table tr:last-child td {
-        border-bottom: none;
+    .summary-table-style {
+        width: 100%;
+        border-collapse: collapse;
+        margin-bottom: 32px;
+        border: 1px solid #e2e8f0;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.02);
+        border-radius: 8px;
+        overflow: hidden;
+    }
+    .summary-table-style th {
+        background-color: #1e3a8a;
+        color: #ffffff;
+        font-size: 12px;
+        font-weight: 600;
+        padding: 12px 16px;
+        text-align: left;
+        border: 1px solid #1e3a8a;
+    }
+    .summary-table-style td {
+        padding: 12px 16px;
+        font-size: 13px;
+        border-bottom: 1px solid #e2e8f0;
+        border-right: 1px solid #e2e8f0;
+        vertical-align: middle;
+        background-color: #ffffff;
+    }
+    .summary-table-style tr:nth-child(even) td {
+        background-color: #f8fafc;
     }
     .badge {
         display: inline-block;
@@ -367,6 +402,81 @@ def generate_html_report(recent_by_stock, all_by_stock, lookback_hours, prices_d
                 <div class="content">
     """
     
+    # ------------------ SUMMARY TABLE ------------------
+    if recent_by_stock:
+        html_body += """
+                    <div class="section-title">Günün Hedef Fiyat Güncellemeleri Özet Tablosu</div>
+                    <table class="summary-table-style">
+                        <thead>
+                            <tr>
+                                <th>Hisse Sembolü</th>
+                                <th>Son Fiyat</th>
+                                <th>Güncelleyen Kurum</th>
+                                <th>Potansiyel Getiri / Fiyat / Ortalama Hedef Potansiyel</th>
+                                <th style="text-align: center;">Toplam Kurum</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+        """
+        for stock, updates in recent_by_stock.items():
+            all_ratings = all_by_stock.get(stock, [])
+            current_price = prices_dict.get(stock)
+            
+            price_val_str = f"{current_price:.2f} TL" if current_price else "-"
+            
+            # List of updating brokers short titles
+            updating_brokers = []
+            for item in updates:
+                broker_name = item.get('brokerage', {}).get('short_title') or item.get('brokerage', {}).get('title', '-')
+                updating_brokers.append(broker_name)
+            brokers_str = ", ".join(updating_brokers)
+            
+            # Generate potential targets descriptions
+            targets_pot_list = []
+            for item in updates:
+                broker_short = item.get('brokerage', {}).get('short_title') or item.get('brokerage', {}).get('title', '-')
+                target_val = item.get('price_target')
+                pot_html = ""
+                if target_val and current_price and current_price > 0:
+                    diff = ((target_val - current_price) / current_price) * 100
+                    pot_txt = f"+%{diff:.1f}" if diff > 0 else (f"-%{abs(diff):.1f}" if diff < 0 else "%0.0")
+                    pot_html = f" ({pot_txt})"
+                    
+                target_txt = f"{target_val:.2f} TL" if target_val else "-"
+                targets_pot_list.append(f"<strong>{broker_short}</strong>: {target_txt}{pot_html}")
+                
+            # Consensus Stats
+            targets = [r.get('price_target') for r in all_ratings if r.get('price_target') is not None]
+            avg_target = sum(targets) / len(targets) if targets else 0
+            num_brokers = len(all_ratings)
+            
+            avg_target_str = f"{avg_target:.2f} TL" if avg_target else "-"
+            avg_pot_html = ""
+            if avg_target and current_price and current_price > 0:
+                avg_diff = ((avg_target - current_price) / current_price) * 100
+                avg_pot_txt = f"+%{avg_diff:.1f}" if avg_diff > 0 else (f"-%{abs(avg_diff):.1f}" if avg_diff < 0 else "%0.0")
+                avg_pot_html = f" ({avg_pot_txt} Ort. Pot.)"
+                
+            targets_pot_list.append(f'<span style="color: #1e3a8a; font-size: 11.5px; border-top: 1px dashed #cbd5e1; display: block; margin-top: 4px; padding-top: 4px;">Konsensüs Ort: {avg_target_str}{avg_pot_html}</span>')
+            
+            pot_fiyat_avg_html = "<br>".join(targets_pot_list)
+            
+            html_body += f"""
+                            <tr>
+                                <td style="font-weight: bold; color: #1e3a8a; font-size: 14px;">{stock}</td>
+                                <td style="font-weight: 600; color: #475569;">{price_val_str}</td>
+                                <td>{brokers_str}</td>
+                                <td>{pot_fiyat_avg_html}</td>
+                                <td style="text-align: center; font-weight: 600;">{num_brokers}</td>
+                            </tr>
+            """
+            
+        html_body += """
+                        </tbody>
+                    </table>
+        """
+        
+    # ------------------ MAIN CONTENT & DETAILED STOCK CARDS ------------------
     if not recent_by_stock:
         # If no updates, display an empty state report
         html_body += f"""
@@ -394,7 +504,7 @@ def generate_html_report(recent_by_stock, all_by_stock, lookback_hours, prices_d
                                     <th>Hisse</th>
                                     <th>Aracı Kurum</th>
                                     <th>Hedef Fiyat</th>
-                                    <th>Tavsiye / Model Portföy</th>
+                                    <th>Tavsiye / Fark</th>
                                     <th>Tarih</th>
                                 </tr>
                             </thead>
@@ -407,7 +517,7 @@ def generate_html_report(recent_by_stock, all_by_stock, lookback_hours, prices_d
                 target = item.get('price_target')
                 target_str = f"{target:.2f} TL" if target else "Belirtilmemiş"
                 
-                # Fetch price string for symbol next to ticker
+                # Format price string next to stock name
                 stock_label = stock
                 if current_price:
                     stock_label = f'{stock} <br><span style="font-size: 11px; color: #64748b; font-weight: normal;">(Fiyat: {current_price:.2f} TL)</span>'
@@ -416,6 +526,7 @@ def generate_html_report(recent_by_stock, all_by_stock, lookback_hours, prices_d
                 rec_text = TYPE_TRANSLATIONS.get(rec_type, 'Belirtilmemiş')
                 badge_color = TYPE_COLORS.get(rec_type, '#6b7280')
                 
+                # Potential Diff
                 pot_html = calculate_potential_html(target, current_price)
                 
                 # Model portfolio badge
@@ -452,12 +563,9 @@ def generate_html_report(recent_by_stock, all_by_stock, lookback_hours, prices_d
                     </div>
             """
     else:
-        html_body += f"""
-                    <div class="info-box">
-                        Toplam <strong>{len(recent_by_stock)}</strong> farklı hissede hedef fiyat güncellemesi tespit edildi.
-                    </div>
+        html_body += """
+                    <div class="section-title" style="margin-top: 32px;">Hisse Bazlı Detaylı Raporlar</div>
         """
-        
         for stock, updates in recent_by_stock.items():
             all_ratings = all_by_stock.get(stock, [])
             current_price = prices_dict.get(stock)
